@@ -128,11 +128,30 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
   };
 
   const getAIResponse = async (message: string): Promise<string> => {
-    // Get context information for better AI responses
-    const context = aiService.getContextInfo();
+    try {
+      // Get context information for better AI responses
+      const context = aiService.getContextInfo();
 
-    // Call the AI service with context
-    return await aiService.getAIResponse(message, context);
+      // Call the AI service with context
+      return await aiService.getAIResponse(message, context);
+    } catch (error) {
+      console.error('AI Response Error:', error);
+
+      // Provide more specific error messages
+      if (error instanceof Error) {
+        if (error.message.includes('Authentication failed')) {
+          return '❌ API Key Error: Please check your DeepSeek API key configuration.';
+        } else if (error.message.includes('Rate limit')) {
+          return '⏱️ Rate Limit: Too many requests. Please wait a moment and try again.';
+        } else if (error.message.includes('Network') || error.message.includes('fetch')) {
+          return '🌐 Network Error: Please check your internet connection and try again.';
+        } else if (error.message.includes('Server error')) {
+          return '🛠️ Server Error: The AI service is temporarily unavailable. Please try again later.';
+        }
+      }
+
+      return '🤖 AI Service Error: Something went wrong. Please try again or contact support if the issue persists.';
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
