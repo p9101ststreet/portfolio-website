@@ -37,7 +37,7 @@ class AIService {
     for (const provider of this.providers) {
       try {
         console.log(`Attempting to use ${provider.name} provider`);
-        const response = await this.callProvider(provider, message, context);
+        const response = await this.callProviderWithRetry(provider, message, context);
         if (response) {
           console.log(`Success with ${provider.name}:`, response.substring(0, 100) + '...');
           return response;
@@ -51,6 +51,41 @@ class AIService {
     // If all providers fail, return mock response
     console.log('All providers failed, using mock response');
     return this.getMockResponse(message);
+  }
+
+  private async callProviderWithRetry(provider: AIProvider, message: string, context?: string, maxRetries: number = 2): Promise<string> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      try {
+        console.log(`Attempt ${attempt}/${maxRetries + 1} for ${provider.name}`);
+        const response = await this.callProvider(provider, message, context);
+        return response;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.error(`Attempt ${attempt} failed for ${provider.name}:`, lastError.message);
+
+        // Don't retry for certain errors
+        if (lastError.message.includes('Authentication failed') ||
+            lastError.message.includes('Access forbidden') ||
+            lastError.message.includes('Invalid response format')) {
+          console.log('Not retrying due to permanent error');
+          throw lastError;
+        }
+
+        // If this is the last attempt, throw the error
+        if (attempt > maxRetries) {
+          throw lastError;
+        }
+
+        // Wait before retrying (exponential backoff)
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+        console.log(`Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError || new Error('Unknown error occurred');
   }
 
   private async callProvider(provider: AIProvider, message: string, context?: string): Promise<string> {
@@ -93,51 +128,109 @@ Please provide helpful, accurate responses about my projects, technical skills, 
       });
 
       console.log(`API Response Status: ${response.status}`);
+      console.log(`API Response Headers:`, Object.fromEntries(response.headers.entries()));
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`API Error: ${response.status} - ${errorText}`);
-        throw new Error(`API call failed: ${response.status} - ${errorText}`);
+        let errorText = '';
+        try {
+          errorText = await response.text();
+        } catch (e) {
+          errorText = 'Unable to read error response';
+        }
+
+        console.error(`API Error Details:`, {
+          status: response.status,
+          statusText: response.statusText,
+          errorText,
+          provider: provider.name,
+          url: `${provider.baseUrl}/chat/completions`
+        });
+
+        // Handle specific HTTP status codes
+        if (response.status === 429) {
+          throw new Error('Rate limit exceeded. Please wait before making another request.');
+        } else if (response.status === 401) {
+          throw new Error('Authentication failed. Please check API key.');
+        } else if (response.status === 403) {
+          throw new Error('Access forbidden. Please check API permissions.');
+        } else if (response.status >= 500) {
+          throw new Error('Server error. Please try again later.');
+        } else {
+          throw new Error(`API call failed: ${response.status} - ${response.statusText}`);
+        }
       }
 
-      const data = await response.json();
-      console.log('API Response Data:', data);
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        console.error('Failed to parse JSON response:', parseError);
+        throw new Error('Invalid response format from API');
+      }
 
-      // Handle different response formats
+      console.log('API Response Data Structure:', {
+        hasChoices: !!data.choices,
+        choicesLength: data.choices?.length,
+        firstChoiceKeys: data.choices?.[0] ? Object.keys(data.choices[0]) : null,
+        dataKeys: Object.keys(data)
+      });
+
+      // Handle different response formats with more detailed logging
       let content = null;
 
       // Standard OpenAI format
       if (data.choices?.[0]?.message?.content) {
         content = data.choices[0].message.content;
+        console.log('Using OpenAI format: choices[0].message.content');
       }
       // Alternative format (some providers might use different structure)
       else if (data.choices?.[0]?.text) {
         content = data.choices[0].text;
+        console.log('Using alternative format: choices[0].text');
       }
       // DeepSeek specific format
       else if (data.choices?.[0]?.delta?.content) {
         content = data.choices[0].delta.content;
+        console.log('Using DeepSeek format: choices[0].delta.content');
       }
       // Fallback for any other format
       else if (data.content) {
         content = data.content;
+        console.log('Using fallback format: data.content');
       }
       else if (data.response) {
         content = data.response;
+        console.log('Using fallback format: data.response');
+      }
+      // Check for streaming response
+      else if (data.choices?.[0]?.finish_reason === 'stop' && data.choices[0].message) {
+        content = data.choices[0].message.content || '';
+        console.log('Using streaming completion format');
       }
 
-      if (!content) {
-        console.error('No content found in API response:', data);
+      if (!content || content.trim() === '') {
+        console.error('No content found in API response. Full response:', JSON.stringify(data, null, 2));
         console.error('Available keys in response:', Object.keys(data));
         if (data.choices?.[0]) {
-          console.error('Choice structure:', data.choices[0]);
+          console.error('Choice structure:', JSON.stringify(data.choices[0], null, 2));
+        }
+        if (data.error) {
+          console.error('API Error in response:', data.error);
+          throw new Error(`API Error: ${data.error.message || 'Unknown error'}`);
         }
         throw new Error('No content in API response');
       }
 
-      return content;
+      console.log(`Successfully extracted content (${content.length} characters)`);
+      return content.trim();
     } catch (error) {
-      console.error(`Error calling ${provider.name}:`, error);
+      console.error(`Error calling ${provider.name}:`, {
+        error,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        provider: provider.name,
+        url: provider.baseUrl
+      });
       throw error;
     }
   }

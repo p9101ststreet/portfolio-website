@@ -90,14 +90,38 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
       // Save to database
       await saveChatInteraction(sessionId, message, response);
     } catch (error) {
-      console.error('Error sending message:', error);
-      const errorMessage: Message = {
+      const errorText = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      const errorType = error instanceof Error ? error.constructor.name : typeof error;
+
+      console.error('Detailed error sending message:', {
+        error,
+        message: errorText,
+        stack: errorStack,
+        type: errorType,
+        timestamp: new Date().toISOString()
+      });
+
+      // More specific error handling based on error type
+      let errorContent = 'Sorry, I encountered an error. Please try again.';
+
+      if (errorText.includes('network') || errorText.includes('fetch') || errorText.includes('Failed to fetch')) {
+        errorContent = 'Network error. Please check your connection and try again.';
+      } else if (errorText.includes('API') || errorText.includes('response') || errorText.includes('status')) {
+        errorContent = 'AI service temporarily unavailable. Please try again shortly.';
+      } else if (errorText.includes('timeout') || errorText.includes('aborted')) {
+        errorContent = 'Request timed out. Please try again.';
+      } else if (errorText.includes('rate limit') || errorText.includes('429')) {
+        errorContent = 'Too many requests. Please wait a moment and try again.';
+      }
+
+      const errorMessageObj: Message = {
         id: `error_${Date.now()}`,
         role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
+        content: errorContent,
         timestamp: new Date()
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages(prev => [...prev, errorMessageObj]);
     } finally {
       setIsLoading(false);
     }
